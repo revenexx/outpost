@@ -276,3 +276,35 @@ func writeAccountDir(t *testing.T, accountsDir string, acc mqs.NATSAccountConfig
 		"tenant_id: " + acc.TenantID + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.yaml"), []byte(meta), 0o600))
 }
+
+// TestNATS_SubscribeLazyInit_EmptyAccountsDir covers the publishmq-path
+// regression: the publishmq consumer constructs the queue via mqs.NewQueue and
+// calls Subscribe directly, never Init. Subscribe must therefore lazily
+// initialize the queue and tolerate a still-empty accounts directory at
+// startup — returning a working (empty) subscription that the directory
+// watcher fills as credentials land — instead of failing the consumer
+// permanently with "nats: queue not initialized".
+//
+// This runs without a broker: with zero accounts on disk no NATS connection is
+// dialled, so it is a fast unit test rather than an integration test.
+func TestNATS_SubscribeLazyInit_EmptyAccountsDir(t *testing.T) {
+	t.Parallel()
+
+	config := mqs.QueueConfig{
+		NATS: &mqs.NATSConfig{
+			Servers:     []string{"nats://127.0.0.1:4222"},
+			AccountsDir: t.TempDir(), // exists but empty
+		},
+	}
+
+	queue := mqs.NewQueue(&config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Intentionally no queue.Init(ctx) — mirror the publishmq consumer path.
+	sub, err := queue.Subscribe(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, sub)
+	_ = sub.Shutdown(context.Background())
+}

@@ -77,6 +77,15 @@ type NATSQueue struct {
 
 	servers string
 	watcher *natsAccountsWatcher
+
+	// initOnce guards lazy initialization so connect() runs exactly once
+	// whether triggered by an explicit Init() or by the first Subscribe().
+	// The publishmq consumer path constructs the queue via mqs.NewQueue and
+	// calls Subscribe directly without ever calling Init (mirroring how the
+	// RabbitMQ driver lazily connects inside Subscribe), so Subscribe must be
+	// able to stand alone.
+	initOnce sync.Once
+	initErr  error
 }
 
 type natsConn struct {
@@ -96,16 +105,40 @@ func NewNATSQueue(config *NATSConfig) *NATSQueue {
 	}
 }
 
-// Init validates the configuration, opens one NATS connection per account,
-// verifies each stream + consumer exists, and (if AccountsDir is set) starts
-// a filesystem watcher that adds and removes accounts at runtime. The
-// returned cleanup function drains every connection and stops the watcher.
+// Init eagerly initializes the queue and returns a cleanup function that
+// drains every connection and stops the watcher. It is optional: Subscribe
+// lazily initializes the queue if Init was never called (the publishmq
+// consumer path). Calling Init more than once, or Init followed by Subscribe,
+// is safe — initialization runs exactly once.
 func (q *NATSQueue) Init(ctx context.Context) (func(), error) {
+	if err := q.ensureInit(ctx); err != nil {
+		return nil, err
+	}
+	return func() { q.closeAll() }, nil
+}
+
+// ensureInit runs connect() exactly once and caches its result, so both an
+// explicit Init() and the first Subscribe() converge on a single connect.
+func (q *NATSQueue) ensureInit(ctx context.Context) error {
+	q.initOnce.Do(func() { q.initErr = q.connect(ctx) })
+	return q.initErr
+}
+
+// connect validates the configuration, opens one NATS connection per account,
+// verifies each stream + consumer exists, and (if AccountsDir is set) starts a
+// filesystem watcher that adds and removes accounts at runtime.
+//
+// When AccountsDir is set it is valid to start with zero accounts on disk: the
+// watcher will add them as their credentials land. This matters on a cold
+// start where Outpost comes up before a tenant's .creds have been synced to
+// the shared directory — without it the publishmq consumer would fail
+// permanently instead of waiting for the directory to fill.
+func (q *NATSQueue) connect(ctx context.Context) error {
 	if q.config == nil {
-		return nil, errors.New("nats: nil config")
+		return errors.New("nats: nil config")
 	}
 	if len(q.config.Servers) == 0 {
-		return nil, errors.New("nats: no servers configured")
+		return errors.New("nats: no servers configured")
 	}
 
 	q.servers = strings.Join(q.config.Servers, ",")
@@ -114,18 +147,20 @@ func (q *NATSQueue) Init(ctx context.Context) (func(), error) {
 	if q.config.AccountsDir != "" {
 		dirAccounts, err := loadAccountsFromDir(q.config.AccountsDir)
 		if err != nil {
-			return nil, fmt.Errorf("nats: %w", err)
+			return fmt.Errorf("nats: %w", err)
 		}
 		accounts = append(accounts, dirAccounts...)
 	}
-	if len(accounts) == 0 {
-		return nil, errors.New("nats: no accounts configured")
+	// Only hard-fail on an empty account set when there is no watched
+	// directory to supply accounts later; otherwise wait for the watcher.
+	if len(accounts) == 0 && q.config.AccountsDir == "" {
+		return errors.New("nats: no accounts configured")
 	}
 
 	for _, acc := range accounts {
 		if err := q.addAccount(ctx, acc); err != nil {
 			q.closeAll()
-			return nil, err
+			return err
 		}
 	}
 
@@ -133,13 +168,13 @@ func (q *NATSQueue) Init(ctx context.Context) (func(), error) {
 		w, err := newNATSAccountsWatcher(q.config.AccountsDir, q.reconcileFromDir)
 		if err != nil {
 			q.closeAll()
-			return nil, fmt.Errorf("nats: watch accounts_dir: %w", err)
+			return fmt.Errorf("nats: watch accounts_dir: %w", err)
 		}
 		q.watcher = w
 		w.start()
 	}
 
-	return func() { q.closeAll() }, nil
+	return nil
 }
 
 func (q *NATSQueue) closeAll() {
@@ -301,11 +336,12 @@ func (q *NATSQueue) Publish(ctx context.Context, msg IncomingMessage) error {
 // and fans messages into a single multiplexed Subscription. Accounts added
 // later (via the directory watcher) automatically get a pump started too.
 func (q *NATSQueue) Subscribe(ctx context.Context, opts ...SubscribeOption) (Subscription, error) {
-	q.mu.Lock()
-	if len(q.conns) == 0 {
-		q.mu.Unlock()
-		return nil, errors.New("nats: queue not initialized")
+	// Lazily initialize when Subscribe is the entry point (publishmq path).
+	if err := q.ensureInit(ctx); err != nil {
+		return nil, err
 	}
+
+	q.mu.Lock()
 	if q.sub != nil {
 		q.mu.Unlock()
 		return nil, errors.New("nats: already subscribed")
@@ -334,6 +370,14 @@ func (q *NATSQueue) Subscribe(ctx context.Context, opts ...SubscribeOption) (Sub
 	for _, c := range conns {
 		if err := sub.startPump(ctx, c); err != nil {
 			_ = sub.Shutdown(context.Background())
+			// Clear the failed subscription so the queue is not left pinned to
+			// a shut-down sub (which the watcher would otherwise attach pumps
+			// to). A later Subscribe can then retry cleanly.
+			q.mu.Lock()
+			if q.sub == sub {
+				q.sub = nil
+			}
+			q.mu.Unlock()
 			return nil, err
 		}
 	}
