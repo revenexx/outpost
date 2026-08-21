@@ -44,6 +44,19 @@ type NATSConfig struct {
 	// account plus a .creds file. Accounts are added and removed at runtime
 	// as directories appear and disappear, without restarting Outpost.
 	AccountsDir string
+
+	// AccountsRescanInterval re-reads AccountsDir on a timer, independently
+	// of the filesystem watch. Zero selects defaultRescanInterval; negative
+	// disables the rescan and leaves discovery on fsnotify alone.
+	//
+	// The watch cannot be relied on by itself. inotify is a local-kernel
+	// mechanism: when AccountsDir is a network mount and the writer runs on
+	// a different host, this process is never told anything changed. That is
+	// not hypothetical — with the writer and Outpost on separate Swarm nodes
+	// sharing an NFS volume, a tenant provisioned after startup stayed
+	// invisible for nine days while its stream filled up, because the only
+	// other discovery path is the scan at startup.
+	AccountsRescanInterval time.Duration
 }
 
 // NATSAccountConfig is a single NATS Account that Outpost consumes from.
@@ -130,7 +143,7 @@ func (q *NATSQueue) Init(ctx context.Context) (func(), error) {
 	}
 
 	if q.config.AccountsDir != "" {
-		w, err := newNATSAccountsWatcher(q.config.AccountsDir, q.reconcileFromDir)
+		w, err := newNATSAccountsWatcher(q.config.AccountsDir, q.reconcileFromDir, q.config.AccountsRescanInterval)
 		if err != nil {
 			q.closeAll()
 			return nil, fmt.Errorf("nats: watch accounts_dir: %w", err)
