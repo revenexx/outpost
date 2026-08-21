@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/hookdeck/outpost/internal/mqs"
 )
@@ -45,6 +46,8 @@ type PublishNATSConfig struct {
 	Servers     []string                   `yaml:"servers" env:"PUBLISH_NATS_SERVERS" envSeparator:"," desc:"NATS cluster URLs for the publish source (comma-separated, e.g. 'nats://a:4222,nats://b:4222'). Required if NATS is the chosen publish MQ provider." required:"C"`
 	AccountsDir string                     `yaml:"accounts_dir" env:"PUBLISH_NATS_ACCOUNTS_DIR" desc:"Directory containing per-tenant NATS account subdirectories (each with a meta.yaml plus credentials file). Watched for runtime changes. Combined with 'accounts' if both are set." required:"N"`
 	Accounts    []PublishNATSAccountConfig `yaml:"accounts" desc:"Static list of NATS accounts to consume from. Alternative or supplement to accounts_dir." required:"N"`
+
+	AccountsRescanIntervalSeconds int `yaml:"accounts_rescan_interval_seconds" env:"PUBLISH_NATS_ACCOUNTS_RESCAN_INTERVAL_SECONDS" desc:"How often to re-read accounts_dir regardless of filesystem events. The watch alone misses writes made from another host when accounts_dir is a network mount. 0 uses the built-in default (60s); negative disables the rescan." required:"N"`
 }
 
 type PublishMQConfig struct {
@@ -128,6 +131,9 @@ func (c *PublishMQConfig) GetQueueConfig() *mqs.QueueConfig {
 				Servers:     c.NATS.Servers,
 				AccountsDir: c.NATS.AccountsDir,
 				Accounts:    accounts,
+				// Seconds in, Duration out — same shape as RetryIntervalSeconds.
+				// 0 stays 0 so the queue applies its own default.
+				AccountsRescanInterval: time.Duration(c.NATS.AccountsRescanIntervalSeconds) * time.Second,
 			},
 		}
 	default:
