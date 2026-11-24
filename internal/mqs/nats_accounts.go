@@ -34,12 +34,12 @@ type accountMetaFile struct {
 // loadAccountsFromDir scans dir for tenant subdirectories that contain a
 // meta.yaml file and returns the list of accounts. Subdirectories without
 // a meta.yaml are skipped (still being written, perhaps).
-func loadAccountsFromDir(dir string) ([]NATSAccountConfig, error) {
+func loadAccountsFromDir(dir string) ([]NATSPublishAccountConfig, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read accounts_dir %q: %w", dir, err)
 	}
-	var accounts []NATSAccountConfig
+	var accounts []NATSPublishAccountConfig
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -63,14 +63,14 @@ func loadAccountsFromDir(dir string) ([]NATSAccountConfig, error) {
 	return accounts, nil
 }
 
-func loadAccountMeta(metaPath, accountDir, dirName string) (NATSAccountConfig, error) {
+func loadAccountMeta(metaPath, accountDir, dirName string) (NATSPublishAccountConfig, error) {
 	body, err := os.ReadFile(metaPath)
 	if err != nil {
-		return NATSAccountConfig{}, err
+		return NATSPublishAccountConfig{}, err
 	}
 	var meta accountMetaFile
 	if err := yaml.Unmarshal(body, &meta); err != nil {
-		return NATSAccountConfig{}, fmt.Errorf("parse meta.yaml: %w", err)
+		return NATSPublishAccountConfig{}, fmt.Errorf("parse meta.yaml: %w", err)
 	}
 
 	name := meta.Name
@@ -91,7 +91,7 @@ func loadAccountMeta(metaPath, accountDir, dirName string) (NATSAccountConfig, e
 		creds = filepath.Join(accountDir, creds)
 	}
 
-	return NATSAccountConfig{
+	return NATSPublishAccountConfig{
 		Name:            name,
 		CredentialsFile: creds,
 		Stream:          meta.Stream,
@@ -103,7 +103,7 @@ func loadAccountMeta(metaPath, accountDir, dirName string) (NATSAccountConfig, e
 // natsAccountsWatcher watches a directory for create/remove/rename events
 // and invokes onChange (debounced) so the queue can reconcile. It also
 // invokes onChange on a timer, because the watch alone is not a reliable
-// signal — see NATSConfig.AccountsRescanInterval.
+// signal — see NATSPublishConfig.AccountsRescanInterval.
 type natsAccountsWatcher struct {
 	dir      string
 	onChange func()
